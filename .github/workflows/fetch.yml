@@ -27,23 +27,40 @@ jobs:
         env:
           ARCH: ${{ github.event.inputs.arch }}
         run: |
-          set -euo pipefail
-          URL="https://claude.ai/api/desktop/win32/${ARCH}/offline/latest/redirect"
-          echo "Downloading: $URL"
-          curl -fL --retry 3 --retry-delay 5 -o claude-offline.msix "$URL"
+          set -uo pipefail
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
+          echo "Runner egress IP info:"
+          curl -s --max-time 20 https://ipinfo.io/json || true
+          echo
+          URLS=(
+            "https://claude.ai/api/desktop/win32/${ARCH}/msix/latest/redirect"
+            "https://claude.ai/api/desktop/win32/${ARCH}/offline/latest/redirect"
+            "https://claude.ai/api/desktop/win32/${ARCH}/setup/latest/redirect"
+          )
+          SUCCESS=0
+          for URL in "${URLS[@]}"; do
+            echo "== Trying: $URL"
+            CODE=$(curl -sL -A "$UA" -H "Accept: */*" --retry 2 --retry-delay 5 \
+              --max-time 1800 -D headers.txt -o claude-offline.msix -w "%{http_code}" "$URL")
+            echo "HTTP $CODE"
+            grep -iE "^(HTTP|location|x-claude-error|content-type|content-length|cf-ray)" headers.txt || true
+            SIZE=$(stat -c%s claude-offline.msix 2>/dev/null || echo 0)
+            echo "Downloaded bytes: $SIZE"
+            MAGIC=$(head -c 2 claude-offline.msix 2>/dev/null || true)
+            if [ "$CODE" = "200" ] && [ "$MAGIC" = "PK" ] && [ "$SIZE" -gt 100000000 ]; then
+              echo "OK: valid package from $URL"
+              SUCCESS=1
+              break
+            fi
+            echo "-- response body preview:"
+            head -c 300 claude-offline.msix || true
+            echo
+          done
+          if [ "$SUCCESS" != "1" ]; then
+            echo "ERROR: all candidate URLs failed"
+            exit 1
+          fi
           ls -lh claude-offline.msix
-          # MSIX 是 ZIP(OPC) 容器，魔数必须为 PK，否则说明下到的是错误页
-          MAGIC=$(head -c 2 claude-offline.msix)
-          if [ "$MAGIC" != "PK" ]; then
-            echo "ERROR: downloaded file is not an MSIX/ZIP container"
-            head -c 500 claude-offline.msix || true
-            exit 1
-          fi
-          SIZE=$(stat -c%s claude-offline.msix)
-          if [ "$SIZE" -lt 500000000 ]; then
-            echo "ERROR: file smaller than 500MB, likely not the full offline package"
-            exit 1
-          fi
           sha256sum claude-offline.msix | tee claude-offline.msix.sha256
 
       - name: Split into parts under 2GB (Release asset limit)
