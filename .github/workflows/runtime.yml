@@ -1,0 +1,47 @@
+# 第二轮中转：Cowork 沙箱运行时组件（VM 镜像 + Claude Code 二进制）
+# 全部为 Anthropic 官方原始压缩文件，校验和来自应用内置 manifest（app.asar）
+name: fetch-sandbox-runtime
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download and verify official runtime components
+        run: |
+          set -euo pipefail
+          VM="https://downloads.claude.ai/vms/linux/x64/37817e321a4a5cfd1b8a667aa82bff9a55fb8f3b"
+          CC="https://downloads.claude.ai/claude-code-releases/2.1.330"
+          fetch() { # url file sha size
+            echo "== $2"
+            curl -fsSL --retry 3 --retry-delay 5 --max-time 1800 -o "$2" "$1"
+            ACTUAL=$(sha256sum "$2" | cut -d' ' -f1)
+            if [ "$ACTUAL" != "$3" ]; then echo "SHA256 MISMATCH for $2: $ACTUAL != $3"; exit 1; fi
+            SIZE=$(stat -c%s "$2")
+            if [ "$SIZE" != "$4" ]; then echo "SIZE MISMATCH for $2: $SIZE != $4"; exit 1; fi
+            echo "OK $2 ($SIZE bytes)"
+          }
+          fetch "$VM/rootfs.vhdx.zst" rootfs.vhdx.zst 26227dd36dcafd0ba15cdf1e01cbb845446b9de22823eca3726457879ea7d0ee 1328390764
+          fetch "$VM/vmlinuz.zst"     vmlinuz.zst     586266512091f17cb49552d0fb72603b310e1b851b0acd80f68ee855ddb31025 14809069
+          fetch "$VM/initrd.zst"      initrd.zst      53455c9ccd4b5bcab137770a729a2ec121f64b5d9d34b521257e5512364865c3 28022889
+          fetch "$CC/win32-x64/claude.exe.zst" claude.exe.zst 9424831ad51c1ea74b485e172bfb21524a0784a3bead13140d0ee4ed0d2ed123 139039553
+          fetch "$CC/linux-x64/claude.zst"     claude.zst     d53a3f9aab93c87bba0813d1101677677b457100824f5c3604fea9915ac5237a 136550760
+          ls -lh
+
+      - name: Publish as Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="runtime-$(date -u +%Y%m%d-%H%M%S)"
+          gh release create "$TAG" \
+            rootfs.vhdx.zst vmlinuz.zst initrd.zst claude.exe.zst claude.zst \
+            --title "Cowork sandbox runtime ($TAG)" \
+            --notes "Official Anthropic compressed components, sha256-verified against app manifest."
+          gh release view "$TAG" --json assets --jq '.assets[].name'
