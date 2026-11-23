@@ -1,0 +1,66 @@
+# GitHub 中转下载 Claude 官方离线安装包（含 Cowork 沙箱镜像）
+# 用法：本文件由自动化脚本上传到临时私有仓库并触发，无需手动操作。
+# 原理：Actions 构建机在美国，可直接访问 claude.ai 下载官方离线包；
+#       因免费账号 Actions 产物存储仅 500MB，改为分卷(<2GB)上传到 Release 资产，
+#       本地经 api.github.com（国内可直连）取回后合并。
+# 安全：下载的是 Anthropic 官方原始文件；记录 SHA256；
+#       Windows 安装脚本(修复沙箱.ps1)安装前还会强制 Authenticode 验签。
+name: fetch-claude-offline
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "CPU architecture: x64 or arm64"
+        required: true
+        default: "x64"
+        type: choice
+        options: [x64, arm64]
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download official offline package
+        env:
+          ARCH: ${{ github.event.inputs.arch }}
+        run: |
+          set -euo pipefail
+          URL="https://claude.ai/api/desktop/win32/${ARCH}/offline/latest/redirect"
+          echo "Downloading: $URL"
+          curl -fL --retry 3 --retry-delay 5 -o claude-offline.msix "$URL"
+          ls -lh claude-offline.msix
+          # MSIX 是 ZIP(OPC) 容器，魔数必须为 PK，否则说明下到的是错误页
+          MAGIC=$(head -c 2 claude-offline.msix)
+          if [ "$MAGIC" != "PK" ]; then
+            echo "ERROR: downloaded file is not an MSIX/ZIP container"
+            head -c 500 claude-offline.msix || true
+            exit 1
+          fi
+          SIZE=$(stat -c%s claude-offline.msix)
+          if [ "$SIZE" -lt 500000000 ]; then
+            echo "ERROR: file smaller than 500MB, likely not the full offline package"
+            exit 1
+          fi
+          sha256sum claude-offline.msix | tee claude-offline.msix.sha256
+
+      - name: Split into parts under 2GB (Release asset limit)
+        run: |
+          set -euo pipefail
+          split -b 1900M -d -a 2 claude-offline.msix claude-offline.msix.part-
+          ls -lh claude-offline.msix.part-*
+
+      - name: Publish parts as Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="offline-$(date -u +%Y%m%d-%H%M%S)"
+          gh release create "$TAG" \
+            claude-offline.msix.part-* claude-offline.msix.sha256 \
+            --title "Claude offline package ($TAG)" \
+            --notes "Official Anthropic offline installer parts. Merge in filename order: copy /b claude-offline.msix.part-00+part-01+... claude-offline.msix ; verify with .sha256 ; installer enforces Authenticode signature."
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+          gh release view "$TAG" --json assets --jq '.assets[].name'
