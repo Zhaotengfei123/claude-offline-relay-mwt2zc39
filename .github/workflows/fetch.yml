@@ -23,6 +23,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download official offline package
         env:
           ARCH: ${{ github.event.inputs.arch }}
